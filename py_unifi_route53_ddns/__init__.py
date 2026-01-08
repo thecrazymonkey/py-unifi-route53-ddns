@@ -51,12 +51,16 @@ def get_my_ip():
 
 def get_route53_ip(hosted_zone_dns_name, my_dns_name):
     res = route53.list_hosted_zones_by_name(DNSName=hosted_zone_dns_name)
+    if not res.get("HostedZones") or res["HostedZones"][0]["Name"] != f"{hosted_zone_dns_name}.":
+        logger.error("Could not find hosted zone for %s", hosted_zone_dns_name)
+        return None, None
     hosted_zone_id = res["HostedZones"][0]["Id"]
     lrrs_paginator = route53.get_paginator("list_resource_record_sets")
     for page in lrrs_paginator.paginate(HostedZoneId=hosted_zone_id):
         for rrs in page["ResourceRecordSets"]:
             if rrs["Name"] == f"{my_dns_name}." and rrs["Type"] == "A":
                 return rrs["ResourceRecords"][0]["Value"], hosted_zone_id
+    return None, hosted_zone_id
 
 
 def set_route53_ip(new_ip, my_dns_name, hosted_zone_id, ttl):
@@ -79,6 +83,9 @@ def run():
     TTL = int(os.environ["ROUTE53_TTL"])
     my_ip = get_my_ip()
     route53_ip, hosted_zone_id = get_route53_ip(hosted_zone_dns_name=HOSTED_ZONE_DNS_NAME, my_dns_name=MY_DNS_NAME)
+    if hosted_zone_id is None:
+        logger.error("Skipping update due to missing hosted zone.")
+        return
     if my_ip != route53_ip:
         logger.info(
             "Will update IP in %s (%s) for %s from %s to %s",
