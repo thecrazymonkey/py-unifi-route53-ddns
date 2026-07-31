@@ -1,5 +1,6 @@
 import argparse
 import getpass
+import ipaddress
 import logging
 import os
 import shutil
@@ -18,11 +19,12 @@ systemd_timer = """[Unit]
 Description="Run py-unifi-route53-ddns.service every 5 minutes"
 
 [Timer]
-OnCalendar=*:5/10
+OnCalendar=*:0/5
+Persistent=true
 Unit=py-unifi-route53-ddns.service
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=timers.target
 """
 
 systemd_override = """[Service]
@@ -42,11 +44,18 @@ parser.add_argument("action", choices=["install", "run"])
 
 
 def get_my_ip():
-    res = http.request("GET", "https://cloudflare.com/cdn-cgi/trace")
+    res = http.request("GET", "https://cloudflare.com/cdn-cgi/trace", timeout=urllib3.Timeout(total=10))
+    if res.status != 200:
+        logger.error("IP lookup returned unexpected status %s", res.status)
+        return None
     for line in res.data.decode().splitlines():
         data = line.split("=")
         if data[0] == "ip":
-            return data[1]
+            try:
+                return str(ipaddress.IPv4Address(data[1]))
+            except ValueError:
+                logger.error("IP lookup returned %s, expected an IPv4 address", data[1])
+                return None
 
 
 def get_route53_ip(hosted_zone_dns_name, my_dns_name):
@@ -82,6 +91,9 @@ def run():
     MY_DNS_NAME = os.environ["ROUTE53_MY_DNS_NAME"]
     TTL = int(os.environ["ROUTE53_TTL"])
     my_ip = get_my_ip()
+    if my_ip is None:
+        logger.error("Skipping update due to failure to determine current IP.")
+        return
     route53_ip, hosted_zone_id = get_route53_ip(hosted_zone_dns_name=HOSTED_ZONE_DNS_NAME, my_dns_name=MY_DNS_NAME)
     if hosted_zone_id is None:
         logger.error("Skipping update due to missing hosted zone.")
@@ -100,7 +112,6 @@ def run():
         logger.info(
             "IP in %s (%s) for %s (%s) matches, nothing to do", HOSTED_ZONE_DNS_NAME, hosted_zone_id, MY_DNS_NAME, my_ip
         )
-    route53_ip, _ = get_route53_ip(hosted_zone_dns_name=HOSTED_ZONE_DNS_NAME, my_dns_name=MY_DNS_NAME)
 
 
 def install():
@@ -119,7 +130,10 @@ def install():
     access_key = getpass.getpass("AWS secret access key (hidden): ")
     zone_name = input("Route53 hosted zone DNS name (e.g. example.net): ")
     host_name = input("Route53 dynamic host name (e.g. unifi.example.net): ")
-    with open("/etc/systemd/system/py-unifi-route53-ddns.service.d/env.conf", "w") as env_fh:
+    env_conf_fd = os.open(
+        "/etc/systemd/system/py-unifi-route53-ddns.service.d/env.conf", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
+    )
+    with os.fdopen(env_conf_fd, "w") as env_fh:
         env_fh.write(
             systemd_override.format(akid=akid, access_key=access_key, zone_name=zone_name, host_name=host_name)
         )
