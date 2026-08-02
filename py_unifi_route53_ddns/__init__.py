@@ -1,4 +1,5 @@
 import argparse
+import functools
 import getpass
 import ipaddress
 import logging
@@ -37,10 +38,14 @@ Environment="ROUTE53_TTL=300"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-route53 = boto3.client("route53")
 http = urllib3.PoolManager()
 parser = argparse.ArgumentParser(prog=__name__)
 parser.add_argument("action", choices=["install", "run"])
+
+
+@functools.lru_cache(maxsize=None)
+def route53_client():
+    return boto3.client("route53")
 
 
 def get_my_ip():
@@ -59,12 +64,12 @@ def get_my_ip():
 
 
 def get_route53_ip(hosted_zone_dns_name, my_dns_name):
-    res = route53.list_hosted_zones_by_name(DNSName=hosted_zone_dns_name)
+    res = route53_client().list_hosted_zones_by_name(DNSName=hosted_zone_dns_name)
     if not res.get("HostedZones") or res["HostedZones"][0]["Name"] != f"{hosted_zone_dns_name}.":
         logger.error("Could not find hosted zone for %s", hosted_zone_dns_name)
         return None, None
     hosted_zone_id = res["HostedZones"][0]["Id"]
-    lrrs_paginator = route53.get_paginator("list_resource_record_sets")
+    lrrs_paginator = route53_client().get_paginator("list_resource_record_sets")
     for page in lrrs_paginator.paginate(HostedZoneId=hosted_zone_id):
         for rrs in page["ResourceRecordSets"]:
             if rrs["Name"] == f"{my_dns_name}." and rrs["Type"] == "A":
@@ -82,14 +87,16 @@ def set_route53_ip(new_ip, my_dns_name, hosted_zone_id, ttl):
             "TTL": ttl,
         },
     }
-    res = route53.change_resource_record_sets(HostedZoneId=hosted_zone_id, ChangeBatch={"Changes": [route53_change]})
+    res = route53_client().change_resource_record_sets(
+        HostedZoneId=hosted_zone_id, ChangeBatch={"Changes": [route53_change]}
+    )
     logger.info("Completed update: %s", res)
 
 
 def run():
-    HOSTED_ZONE_DNS_NAME = os.environ["ROUTE53_HOSTED_ZONE_DNS_NAME"]
-    MY_DNS_NAME = os.environ["ROUTE53_MY_DNS_NAME"]
-    TTL = int(os.environ["ROUTE53_TTL"])
+    HOSTED_ZONE_DNS_NAME = os.environ["ROUTE53_HOSTED_ZONE_DNS_NAME"].strip().rstrip(".").lower()
+    MY_DNS_NAME = os.environ["ROUTE53_MY_DNS_NAME"].strip().rstrip(".").lower()
+    TTL = int(os.environ.get("ROUTE53_TTL", "300"))
     my_ip = get_my_ip()
     if my_ip is None:
         logger.error("Skipping update due to failure to determine current IP.")
@@ -117,6 +124,8 @@ def run():
 def install():
     if not shutil.which("systemctl"):
         parser.exit("systemctl does not appear to be active")
+    if os.geteuid() != 0:
+        parser.exit("install must be run as root (retry with sudo)")
     if not shutil.which("py-unifi-route53-ddns"):
         parser.exit("unable to resolve location of py-unifi-route53-ddns")
     logger.info("Installing /etc/systemd/system/py-unifi-route53-ddns.service...")

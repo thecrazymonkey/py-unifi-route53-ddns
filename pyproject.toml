@@ -17,6 +17,11 @@ dependencies = [
     "urllib3"
 ]
 
+[project.optional-dependencies]
+tests = [
+    "pytest"
+]
+
 [project.urls]
 Homepage = "https://github.com/cloud-utils/py-unifi-route53-ddns"
 Issues = "https://github.com/cloud-utils/py-unifi-route53-ddns/issues"
